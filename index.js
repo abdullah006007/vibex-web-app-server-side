@@ -7,6 +7,8 @@ const streamifier = require('streamifier');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const multer = require('multer');
 
+
+
 // Load env variables
 dotenv.config();
 
@@ -76,6 +78,94 @@ async function run() {
         const reportsCollection = db.collection('reports');
         const notificationsCollection = db.collection('notifications');
 
+
+
+
+
+
+        //---------------------------------------------------stripe-----------------------------------------------
+
+
+        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+        // Create Payment Intent (for /membership page)
+        // create payment intent
+        // ✅ create payment intent endpoint
+        // ✅ create payment intent (simple style)
+        app.post('/create-payment-intent', async (req, res) => {
+            try {
+                // You can optionally send price from frontend or hardcode membership price
+                const membershipPriceUSD = 10; // $10 membership
+                let { price } = req.body;
+
+                // Use backend price if frontend price is missing
+                price = price ?? membershipPriceUSD;
+
+                // Convert price to a number and validate
+                const parsedPrice = Number(price);
+                if (isNaN(parsedPrice) || parsedPrice <= 0) {
+                    return res.status(400).json({ error: 'Invalid price provided' });
+                }
+
+                // Convert dollars to cents (Stripe requires integer)
+                const amountInCents = Math.round(parsedPrice * 100);
+
+                // Create Stripe PaymentIntent
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: amountInCents,
+                    currency: 'usd',
+                    automatic_payment_methods: { enabled: true },
+                });
+
+                // Send client secret to frontend
+                res.json({ clientSecret: paymentIntent.client_secret });
+            } catch (error) {
+                console.error('❌ Error creating payment intent:', error.message);
+                res.status(500).json({
+                    error: 'Failed to create payment intent',
+                    details: error.message,
+                });
+            }
+        });
+
+
+
+
+        // Upgrade Membership (for /membership page)
+        app.post('/user/membership/upgrade', verifyFireBaseToken, async (req, res) => {
+            try {
+                const { paymentIntentId } = req.body;
+                const decodedEmail = req.decoded.email?.toLowerCase().trim();
+
+                // Verify payment intent
+                const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+                if (paymentIntent.status !== 'succeeded') {
+                    return res.status(400).json({ error: 'Payment not successful' });
+                }
+
+                // Update user membership status
+                const result = await userCollection.updateOne(
+                    { email: decodedEmail },
+                    { $set: { role: 'gold', membershipUpdatedAt: new Date().toISOString() } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ error: 'User not found' });
+                }
+
+                res.json({ message: 'Membership upgraded to Gold' });
+            } catch (error) {
+                console.error('Error upgrading membership:', error);
+                res.status(500).json({ error: 'Failed to upgrade membership' });
+            }
+        });
+
+
+
+
+
+
+
         // User collection
         app.post('/users', async (req, res) => {
             try {
@@ -105,9 +195,11 @@ async function run() {
         });
 
         // Post APIs
+        // Post Creation API with Post Limit Check
         app.post('/user/post/:uid', verifyFireBaseToken, async (req, res) => {
             try {
                 const uid = req.params.uid;
+                const decodedEmail = req.decoded.email?.toLowerCase().trim();
                 const {
                     authorImage,
                     authorName,
@@ -117,8 +209,23 @@ async function run() {
                     postPhoto,
                     tag,
                     upVote,
-                    downVote
+                    downVote,
                 } = req.body;
+
+                // Check user membership and post count
+                const user = await userCollection.findOne({ email: decodedEmail });
+                if (!user) {
+                    return res.status(404).json({ error: 'User not found' });
+                }
+
+                if (user.role !== 'gold' && user.role !== 'admin') {
+                    const postCount = await postsCollection.countDocuments({ userId: uid });
+                    if (postCount >= 5) {
+                        return res.status(403).json({
+                            error: 'Free users are limited to 5 posts. Upgrade to Gold membership for unlimited posts.',
+                        });
+                    }
+                }
 
                 const postData = {
                     _id: new Date().getTime().toString(),
@@ -133,7 +240,7 @@ async function run() {
                     createdAt: new Date().toISOString(),
                     upVote: upVote || 0,
                     downVote: downVote || 0,
-                    comments: []
+                    comments: [],
                 };
 
                 const result = await postsCollection.insertOne(postData);
@@ -143,6 +250,8 @@ async function run() {
                 res.status(500).json({ error: 'Failed to create post' });
             }
         });
+
+
 
         app.put('/user/post/:postId/upvote', verifyFireBaseToken, async (req, res) => {
             try {
@@ -448,19 +557,45 @@ async function run() {
             }
         });
 
+        // Get User Role
         app.get('/users/role/:email', verifyFireBaseToken, async (req, res) => {
-            const { email } = req.params;
             try {
+                const email = req.params.email.toLowerCase().trim();
                 const user = await userCollection.findOne({ email });
                 if (!user) {
-                    return res.json({ role: 'user', email });
+                    return res.status(404).json({ error: 'User not found' });
                 }
-                return res.json({ role: user.role, email: user.email });
-            } catch (err) {
-                console.error('Error fetching user role:', err);
-                return res.status(500).json({ role: 'user', email, error: 'Server error' });
+                res.json({ role: user.role || 'user' });
+            } catch (error) {
+                console.error('Error fetching user role:', error);
+                res.status(500).json({ error: 'Failed to fetch user role' });
             }
         });
+
+        // Get User Post Count
+        app.get('/user/post/count/:uid', verifyFireBaseToken, async (req, res) => {
+            try {
+                const uid = req.params.uid;
+                const count = await postsCollection.countDocuments({ userId: uid });
+                res.json({ count });
+            } catch (error) {
+                console.error('Error fetching post count:', error);
+                res.status(500).json({ error: 'Failed to fetch post count' });
+            }
+        });
+        // Get User Posts
+        app.get('/user/posts/:uid', verifyFireBaseToken, async (req, res) => {
+            try {
+                const uid = req.params.uid;
+                const posts = await postsCollection.find({ userId: uid }).sort({ createdAt: -1 }).toArray();
+                res.json(posts);
+            } catch (error) {
+                console.error('Error fetching posts:', error);
+                res.status(500).json({ error: 'Failed to fetch posts' });
+            }
+        });
+
+
 
         // Admin APIs
         app.get('/users', verifyFireBaseToken, async (req, res) => {
