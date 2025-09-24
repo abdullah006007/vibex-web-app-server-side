@@ -132,6 +132,7 @@ async function run() {
 
 
         // Upgrade Membership (for /membership page)
+        // Upgrade Membership (for /membership page)
         app.post('/user/membership/upgrade', verifyFireBaseToken, async (req, res) => {
             try {
                 const { paymentIntentId } = req.body;
@@ -143,17 +144,23 @@ async function run() {
                     return res.status(400).json({ error: 'Payment not successful' });
                 }
 
-                // Update user membership status
+                // Update user membership status, subscription, and badge
                 const result = await userCollection.updateOne(
                     { email: decodedEmail },
-                    { $set: { role: 'gold', membershipUpdatedAt: new Date().toISOString() } }
+                    {
+                        $set: {
+                            subscription: 'premium',
+                            Badge: 'Gold',
+                            membershipUpdatedAt: new Date().toISOString()
+                        }
+                    }
                 );
 
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'User not found' });
                 }
 
-                res.json({ message: 'Membership upgraded to Gold' });
+                res.json({ message: 'Membership upgraded to Premium with Gold badge' });
             } catch (error) {
                 console.error('Error upgrading membership:', error);
                 res.status(500).json({ error: 'Failed to upgrade membership' });
@@ -169,32 +176,87 @@ async function run() {
         // User collection
         app.post('/users', async (req, res) => {
             try {
-                const { email, name, role } = req.body;
+                const { email, name } = req.body;
+
                 if (!email) {
                     return res.status(400).json({ message: 'Email is required' });
                 }
 
                 const normalizedEmail = email.toLowerCase().trim();
-                const userExist = await userCollection.findOne({ email: { $regex: new RegExp(`^${normalizedEmail}$`, 'i') } });
+                const userExist = await userCollection.findOne({
+                    email: { $regex: new RegExp(`^${normalizedEmail}$`, 'i') }
+                });
+
                 if (userExist) {
                     return res.status(200).json({ message: 'User already exists', inserted: false });
                 }
 
+                const now = new Date().toISOString();
+
                 const user = {
+                    username: name || 'Anonymous',
                     email: normalizedEmail,
-                    name: name || 'Anonymous',
-                    role: role || 'user',
-                    createdAt: new Date().toISOString(),
+                    role: 'user',                 // default
+                    subscription: 'free',         // default
+                    Badge: 'Bronze',              // default
+                    created_at: now,
+                    last_log_in: now,
                 };
+
                 const result = await userCollection.insertOne(user);
                 res.status(201).json({ message: 'User created successfully', insertedId: result.insertedId });
+
             } catch (error) {
                 console.error('Error inserting user:', error);
                 res.status(500).json({ message: `Failed to add user: ${error.message}` });
             }
         });
 
+
+
+
+
+        // Update User Profile
+        app.put('/users/update', verifyFireBaseToken, async (req, res) => {
+            try {
+                const { email, updates } = req.body;
+                const decodedEmail = req.decoded.email?.toLowerCase().trim();
+
+                if (!email || !updates || email !== decodedEmail) {
+                    return res.status(400).json({ success: false, message: 'Invalid request or unauthorized' });
+                }
+
+                const allowedUpdates = ['name', 'phone', 'address', 'photoURL'];
+                const updateFields = Object.keys(updates).filter(key => allowedUpdates.includes(key));
+                if (updateFields.length === 0) {
+                    return res.status(400).json({ success: false, message: 'No valid fields to update' });
+                }
+
+                const updateData = {};
+                updateFields.forEach(field => {
+                    updateData[field] = updates[field] || null; // Allow null to clear fields
+                });
+
+                const result = await userCollection.updateOne(
+                    { email: decodedEmail },
+                    { $set: updateData }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ success: false, message: 'User not found' });
+                }
+
+                res.json({ success: true, message: 'Profile updated successfully' });
+            } catch (error) {
+                console.error('Error updating user profile:', error);
+                res.status(500).json({ success: false, message: 'Failed to update profile' });
+            }
+        });
+
+
+
         // Post APIs
+        // Post Creation API with Post Limit Check
         // Post Creation API with Post Limit Check
         app.post('/user/post/:uid', verifyFireBaseToken, async (req, res) => {
             try {
@@ -218,11 +280,11 @@ async function run() {
                     return res.status(404).json({ error: 'User not found' });
                 }
 
-                if (user.role !== 'gold' && user.role !== 'admin') {
+                if (user.subscription !== 'premium' && user.role !== 'admin') {
                     const postCount = await postsCollection.countDocuments({ userId: uid });
                     if (postCount >= 5) {
                         return res.status(403).json({
-                            error: 'Free users are limited to 5 posts. Upgrade to Gold membership for unlimited posts.',
+                            error: 'Free users are limited to 5 posts. Upgrade to Premium membership for unlimited posts.',
                         });
                     }
                 }
@@ -250,6 +312,25 @@ async function run() {
                 res.status(500).json({ error: 'Failed to create post' });
             }
         });
+
+
+
+
+        // Get User Subscription
+        app.get('/users/subscription/:email', verifyFireBaseToken, async (req, res) => {
+            try {
+                const email = req.params.email.toLowerCase().trim();
+                const user = await userCollection.findOne({ email });
+                if (!user) {
+                    return res.status(404).json({ error: 'User not found' });
+                }
+                res.json({ subscription: user.subscription || 'free', Badge: user.Badge || 'Bronze' });
+            } catch (error) {
+                console.error('Error fetching user subscription:', error);
+                res.status(500).json({ error: 'Failed to fetch user subscription' });
+            }
+        });
+
 
 
 
@@ -558,6 +639,9 @@ async function run() {
         });
 
         // Get User Role
+
+
+        // Get User Subscription and Role
         app.get('/users/role/:email', verifyFireBaseToken, async (req, res) => {
             try {
                 const email = req.params.email.toLowerCase().trim();
@@ -565,12 +649,17 @@ async function run() {
                 if (!user) {
                     return res.status(404).json({ error: 'User not found' });
                 }
-                res.json({ role: user.role || 'user' });
+                res.json({
+                    subscription: user.subscription || 'free',
+                    Badge: user.Badge || 'Bronze',
+                    role: user.role || 'user' // Include role in the response
+                });
             } catch (error) {
-                console.error('Error fetching user role:', error);
-                res.status(500).json({ error: 'Failed to fetch user role' });
+                console.error('Error fetching user subscription and role:', error);
+                res.status(500).json({ error: 'Failed to fetch user subscription and role' });
             }
         });
+
 
         // Get User Post Count
         app.get('/user/post/count/:uid', verifyFireBaseToken, async (req, res) => {
