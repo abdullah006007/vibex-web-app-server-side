@@ -27,7 +27,11 @@ app.use(express.json());
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-const serviceAccount = require("./firebase_admin_key.json");
+const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+
+const serviceAccount = JSON.parse(decodedKey)
+
+
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -40,12 +44,12 @@ const bucket = admin.storage().bucket();
 const verifyFireBaseToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
-        console.error('verifyFireBaseToken: Missing Authorization header', { url: req.originalUrl });
+        
         return res.status(401).send({ message: 'Unauthorized access', details: 'Missing Authorization header' });
     }
     const token = authHeader.split(' ')[1];
     if (!token) {
-        console.error('verifyFireBaseToken: Missing token in Authorization header', { url: req.originalUrl });
+       
         return res.status(401).send({ message: 'Unauthorized access', details: 'Missing token' });
     }
     try {
@@ -83,7 +87,7 @@ const client = new MongoClient(uri, {
 
 async function run() {
     try {
-        await client.connect();
+        // await client.connect();
 
         const db = client.db('vibeDb');
         const userCollection = db.collection('users');
