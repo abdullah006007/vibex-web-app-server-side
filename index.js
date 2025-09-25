@@ -77,6 +77,7 @@ async function run() {
         const announcementCollection = db.collection('announcements');
         const reportsCollection = db.collection('reports');
         const notificationsCollection = db.collection('notifications');
+        const tagsCollection = db.collection('tags');
 
 
 
@@ -1192,6 +1193,280 @@ async function run() {
                 });
             }
         });
+
+
+
+
+
+
+
+
+        // API to get admin profile
+        app.get('/admin/profile', verifyFireBaseToken, async (req, res) => {
+            try {
+                const userEmail = req.decoded.email?.toLowerCase().trim();
+                if (!userEmail) {
+                    return res.status(400).json({ error: 'Email not provided in token' });
+                }
+
+                // Fetch user
+                const user = await userCollection.findOne({ email: userEmail });
+                if (!user) {
+                    return res.status(404).json({ error: 'User not found' });
+                }
+                if (user.role !== 'admin') {
+                    return res.status(403).json({ error: 'Unauthorized: Admin access required' });
+                }
+
+                // Total users
+                const totalUsers = await userCollection.countDocuments();
+
+                // Total posts
+                const totalPosts = await postsCollection.countDocuments();
+
+                // Total comments
+                const commentsAggregate = await postsCollection
+                    .aggregate([
+                        { $match: { comments: { $exists: true, $ne: [] } } },
+                        { $project: { commentCount: { $size: "$comments" } } },
+                        { $group: { _id: null, totalComments: { $sum: "$commentCount" } } },
+                    ])
+                    .toArray();
+                const totalComments = commentsAggregate.length > 0 ? commentsAggregate[0].totalComments : 0;
+
+                // Total upVotes (likes)
+                const upVotesAggregate = await postsCollection.aggregate([
+                    { $group: { _id: null, totalUpVotes: { $sum: "$upVote" } } }
+                ]).toArray();
+                const totalUpVotes = upVotesAggregate.length > 0 ? upVotesAggregate[0].totalUpVotes : 0;
+
+                // Total downVotes (dislikes)
+                const downVotesAggregate = await postsCollection.aggregate([
+                    { $group: { _id: null, totalDownVotes: { $sum: "$downVote" } } }
+                ]).toArray();
+                const totalDownVotes = downVotesAggregate.length > 0 ? downVotesAggregate[0].totalDownVotes : 0;
+
+                // Total reports
+                const totalReports = await reportsCollection.countDocuments();
+
+                // Total notifications
+                const totalNotifications = await notificationsCollection.countDocuments();
+
+                // Total announcements
+                const totalAnnouncements = await announcementCollection.countDocuments();
+
+                // Total admins
+                const totalAdmins = await userCollection.countDocuments({ role: 'admin' });
+
+                // Total premium users
+                const totalPremium = await userCollection.countDocuments({ subscription: 'premium' });
+
+                // Admin's posts
+                const adminPosts = await postsCollection.countDocuments({ authorEmail: userEmail });
+
+                // Admin's comments
+                const adminCommentsAggregate = await postsCollection
+                    .aggregate([
+                        { $unwind: { path: "$comments", preserveNullAndEmptyArrays: true } },
+                        { $match: { "comments.userEmail": userEmail } },
+                        { $count: "totalAdminComments" },
+                    ])
+                    .toArray();
+                const adminComments = adminCommentsAggregate.length > 0 ? adminCommentsAggregate[0].totalAdminComments : 0;
+
+                // Recent activity (last 30 days)
+                const thirtyDaysAgo = new Date();
+                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+                const recentPosts = await postsCollection.aggregate([
+                    { $match: { createdAt: { $gte: thirtyDaysAgo.toISOString() } } },
+                    {
+                        $group: {
+                            _id: { $dateToString: { format: "%Y-%m-%d", date: { $toDate: "$createdAt" } } },
+                            posts: { $sum: 1 }
+                        }
+                    },
+                    { $sort: { _id: 1 } },
+                    { $project: { date: "$_id", posts: 1, _id: 0 } }
+                ]).toArray();
+
+                const recentUsers = await userCollection.aggregate([
+                    { $match: { created_at: { $gte: thirtyDaysAgo.toISOString() } } },
+                    {
+                        $group: {
+                            _id: { $dateToString: { format: "%Y-%m-%d", date: { $toDate: "$created_at" } } },
+                            users: { $sum: 1 }
+                        }
+                    },
+                    { $sort: { _id: 1 } },
+                    { $project: { date: "$_id", users: 1, _id: 0 } }
+                ]).toArray();
+
+                const recentComments = await postsCollection.aggregate([
+                    { $unwind: "$comments" },
+                    { $match: { "comments.createdAt": { $gte: thirtyDaysAgo.toISOString() } } },
+                    {
+                        $group: {
+                            _id: { $dateToString: { format: "%Y-%m-%d", date: { $toDate: "$comments.createdAt" } } },
+                            comments: { $sum: 1 }
+                        }
+                    },
+                    { $sort: { _id: 1 } },
+                    { $project: { date: "$_id", comments: 1, _id: 0 } }
+                ]).toArray();
+
+                res.json({
+                    name: user.username || 'Admin',
+                    image: user.photoURL || 'https://via.placeholder.com/150',
+                    email: user.email,
+                    posts: adminPosts,
+                    comments: adminComments,
+                    users: totalUsers,
+                    totalPosts,
+                    totalComments,
+                    totalUsers,
+                    totalUpVotes,
+                    totalDownVotes,
+                    totalReports,
+                    totalNotifications,
+                    totalAnnouncements,
+                    totalAdmins,
+                    totalPremium,
+                    recentActivity: {
+                        posts: recentPosts,
+                        users: recentUsers,
+                        comments: recentComments
+                    }
+                });
+            } catch (error) {
+                console.error('Error fetching admin profile:', error.message, error.stack);
+                res.status(500).json({ error: 'Failed to fetch admin profile', details: error.message });
+            }
+        });
+
+
+
+
+        // API to add tag (admin only)
+        app.post('/tags', verifyFireBaseToken, async (req, res) => {
+            try {
+                const userEmail = req.decoded.email?.toLowerCase().trim();
+                if (!userEmail) {
+                    return res.status(400).json({ error: 'Email not provided in token' });
+                }
+
+                const user = await userCollection.findOne({ email: userEmail });
+                if (!user || user.role !== 'admin') {
+                    return res.status(403).json({ error: 'Unauthorized: Admin access required' });
+                }
+
+                const { name } = req.body;
+                if (!name || typeof name !== 'string' || name.trim() === '') {
+                    return res.status(400).json({ error: 'Valid tag name required' });
+                }
+
+                const normalizedTag = name.trim().toLowerCase();
+                const existing = await tagsCollection.findOne({ name: normalizedTag });
+                if (existing) {
+                    return res.status(409).json({ error: 'Tag already exists' });
+                }
+
+                const result = await tagsCollection.insertOne({
+                    name: normalizedTag,
+                    createdAt: new Date().toISOString(),
+                });
+                res.status(201).json({ message: 'Tag added successfully', tag: normalizedTag });
+            } catch (error) {
+                console.error('Error adding tag:', error.message, error.stack);
+                res.status(500).json({ error: 'Failed to add tag', details: error.message });
+            }
+        });
+
+        // API to get all tags
+        app.get('/tags', async (req, res) => {
+            try {
+                const tags = await tagsCollection.find().sort({ name: 1 }).toArray();
+                res.json(tags.map((t) => t.name));
+            } catch (error) {
+                console.error('Error fetching tags:', error.message, error.stack);
+                res.status(500).json({ error: 'Failed to fetch tags', details: error.message });
+            }
+        });
+
+
+
+        // New backend API: app.delete('/tags/:name')
+        // Add this new endpoint after the existing app.post('/tags', ...)
+        app.delete('/tags/:name', verifyFireBaseToken, async (req, res) => {
+            try {
+                const userEmail = req.decoded.email?.toLowerCase().trim();
+                if (!userEmail) {
+                    return res.status(400).json({ error: 'Email not provided in token' });
+                }
+
+                const user = await userCollection.findOne({ email: userEmail });
+                if (!user || user.role !== 'admin') {
+                    return res.status(403).json({ error: 'Unauthorized: Admin access required' });
+                }
+
+                const tagName = req.params.name.trim().toLowerCase();
+                if (!tagName) {
+                    return res.status(400).json({ error: 'Tag name required' });
+                }
+
+                const result = await tagsCollection.deleteOne({ name: tagName });
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ error: 'Tag not found' });
+                }
+
+                res.json({ message: 'Tag deleted successfully' });
+            } catch (error) {
+                console.error('Error deleting tag:', error.message, error.stack);
+                res.status(500).json({ error: 'Failed to delete tag', details: error.message });
+            }
+        });
+
+
+
+
+        app.get('/posts/search', async (req, res) => {
+            try {
+                const tag = req.query.tag?.trim().toLowerCase();
+                if (!tag) {
+                    return res.status(400).json({ error: 'Tag is required for search' });
+                }
+
+                const posts = await postsCollection.find({ tag }).toArray();
+                if (posts.length === 0) {
+                    return res.status(404).json({ message: 'No posts found for this tag' });
+                }
+
+                res.json(posts);
+            } catch (error) {
+                console.error('Error searching posts:', error.message, error.stack);
+                res.status(500).json({ error: 'Failed to search posts', details: error.message });
+            }
+        });
+
+
+        app.get('/posts', async (req, res) => {
+            try {
+                const posts = await postsCollection.find().sort({ createdAt: -1 }).toArray();
+                if (posts.length === 0) {
+                    return res.status(404).json({ message: 'No posts found' });
+                }
+                res.json(posts);
+            } catch (error) {
+                console.error('Error fetching posts:', error.message, error.stack);
+                res.status(500).json({ error: 'Failed to fetch posts', details: error.message });
+            }
+        });
+
+
+
+
+
+
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
