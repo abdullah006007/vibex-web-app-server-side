@@ -218,6 +218,7 @@ async function run() {
 
 
         // Update User Profile
+        // Update User Profile
         app.put('/users/update', verifyFireBaseToken, async (req, res) => {
             try {
                 const { email, updates } = req.body;
@@ -227,7 +228,7 @@ async function run() {
                     return res.status(400).json({ success: false, message: 'Invalid request or unauthorized' });
                 }
 
-                const allowedUpdates = ['name', 'phone', 'address', 'photoURL'];
+                const allowedUpdates = ['name', 'phone', 'address', 'photoURL', 'bio'];
                 const updateFields = Object.keys(updates).filter(key => allowedUpdates.includes(key));
                 if (updateFields.length === 0) {
                     return res.status(400).json({ success: false, message: 'No valid fields to update' });
@@ -653,7 +654,12 @@ async function run() {
                 res.json({
                     subscription: user.subscription || 'free',
                     Badge: user.Badge || 'Bronze',
-                    role: user.role || 'user' // Include role in the response
+                    role: user.role || 'user',
+                    name: user.name || user.username || 'Anonymous',
+                    phone: user.phone || '',
+                    address: user.address || '',
+                    photoURL: user.photoURL || '',
+                    bio: user.bio || ''
                 });
             } catch (error) {
                 console.error('Error fetching user subscription and role:', error);
@@ -690,22 +696,56 @@ async function run() {
         // Admin APIs
         app.get('/users', verifyFireBaseToken, async (req, res) => {
             try {
-                const userEmail = req.decoded.email;
-                const user = await userCollection.findOne({ email: userEmail });
-                if (!user || user.role !== 'admin') {
-                    return res.status(403).json({ error: 'Unauthorized: Admin access required' });
-                }
                 const search = req.query.search || '';
-                const query = search
-                    ? { name: { $regex: search, $options: 'i' } }
-                    : {};
+                const query = search ? { name: { $regex: search, $options: 'i' } } : {};
                 const users = await userCollection.find(query).toArray();
-                res.json(users);
+                res.json(users.map(user => ({
+                    email: user.email,
+                    name: user.name || user.username || 'Anonymous',
+                    bio: user.bio || '',
+                    photoURL: user.photoURL || '',
+                    Badge: user.Badge || 'Bronze'
+                })));
             } catch (error) {
                 console.error('Error fetching users:', error);
                 res.status(500).json({ error: 'Failed to fetch users' });
             }
         });
+
+        // server.js
+        app.post('/connections', verifyFireBaseToken, async (req, res) => {
+            const { fromEmail, toEmail } = req.body;
+            await db.collection('connections').insertOne({
+                fromEmail,
+                toEmail,
+                status: 'pending',
+                createdAt: new Date().toISOString(),
+            });
+            res.json({ message: 'Connection request sent' });
+        });
+
+
+        app.get('/public-users', verifyFireBaseToken, async (req, res) => {
+            try {
+                const search = req.query.search || '';
+                const query = search ? { name: { $regex: search, $options: 'i' } } : {};
+                const users = await userCollection.find(query).toArray();
+                res.json(users.map(user => ({
+                    email: user.email,
+                    name: user.name || user.username || 'Anonymous',
+                    bio: user.bio || '',
+                    photoURL: user.photoURL || '',
+                    Badge: user.Badge || 'Bronze'
+                })));
+            } catch (error) {
+                console.error('Error fetching public users:', error);
+                res.status(500).json({ error: 'Failed to fetch users' });
+            }
+        });
+
+
+
+
 
         app.get('/reports', verifyFireBaseToken, async (req, res) => {
             try {
