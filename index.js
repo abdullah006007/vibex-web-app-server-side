@@ -32,7 +32,7 @@ const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('u
 const serviceAccount = JSON.parse(decodedKey)
 
 
-
+//
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
     storageBucket: "your-project-id.appspot.com",
