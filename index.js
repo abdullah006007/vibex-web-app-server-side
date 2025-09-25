@@ -7,8 +7,6 @@ const streamifier = require('streamifier');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const multer = require('multer');
 
-
-
 // Load env variables
 dotenv.config();
 
@@ -38,22 +36,31 @@ admin.initializeApp({
 
 const bucket = admin.storage().bucket();
 
+// server.js (update verifyFireBaseToken middleware)
 const verifyFireBaseToken = async (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-        return res.status(401).send({ message: 'unauthorized access' });
-    }
-    const token = authHeader.split(' ')[1];
-    if (!token) {
-        return res.status(401).send({ message: 'unauthorized access' });
-    }
-    try {
-        const decoded = await admin.auth().verifyIdToken(token);
-        req.decoded = decoded;
-    } catch (error) {
-        return res.status(403).send({ message: 'unauthorized access' });
-    }
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    console.error('verifyFireBaseToken: Missing Authorization header', { url: req.originalUrl });
+    return res.status(401).send({ message: 'unauthorized access', details: 'Missing Authorization header' });
+  }
+  const token = authHeader.split(' ')[1];
+  if (!token) {
+    console.error('verifyFireBaseToken: Missing token in Authorization header', { url: req.originalUrl });
+    return res.status(401).send({ message: 'unauthorized access', details: 'Missing token' });
+  }
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    console.log('verifyFireBaseToken: Token verified', { uid: decoded.uid, email: decoded.email });
+    req.decoded = decoded;
     next();
+  } catch (error) {
+    console.error('verifyFireBaseToken: Token verification failed', {
+      url: req.originalUrl,
+      error: error.message,
+      code: error.code,
+    });
+    return res.status(403).send({ message: 'unauthorized access', details: error.message });
+  }
 };
 
 // MongoDB
@@ -78,47 +85,26 @@ async function run() {
         const reportsCollection = db.collection('reports');
         const notificationsCollection = db.collection('notifications');
         const tagsCollection = db.collection('tags');
+        const connectionsCollection = db.collection('connections');
 
-
-
-
-
-
-        //---------------------------------------------------stripe-----------------------------------------------
-
-
+        // Stripe
         const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-        // Create Payment Intent (for /membership page)
-        // create payment intent
-        // ✅ create payment intent endpoint
-        // ✅ create payment intent (simple style)
         app.post('/create-payment-intent', async (req, res) => {
             try {
-                // You can optionally send price from frontend or hardcode membership price
-                const membershipPriceUSD = 10; // $10 membership
+                const membershipPriceUSD = 10;
                 let { price } = req.body;
-
-                // Use backend price if frontend price is missing
                 price = price ?? membershipPriceUSD;
-
-                // Convert price to a number and validate
                 const parsedPrice = Number(price);
                 if (isNaN(parsedPrice) || parsedPrice <= 0) {
                     return res.status(400).json({ error: 'Invalid price provided' });
                 }
-
-                // Convert dollars to cents (Stripe requires integer)
                 const amountInCents = Math.round(parsedPrice * 100);
-
-                // Create Stripe PaymentIntent
                 const paymentIntent = await stripe.paymentIntents.create({
                     amount: amountInCents,
                     currency: 'usd',
                     automatic_payment_methods: { enabled: true },
                 });
-
-                // Send client secret to frontend
                 res.json({ clientSecret: paymentIntent.client_secret });
             } catch (error) {
                 console.error('❌ Error creating payment intent:', error.message);
@@ -129,23 +115,14 @@ async function run() {
             }
         });
 
-
-
-
-        // Upgrade Membership (for /membership page)
-        // Upgrade Membership (for /membership page)
         app.post('/user/membership/upgrade', verifyFireBaseToken, async (req, res) => {
             try {
                 const { paymentIntentId } = req.body;
                 const decodedEmail = req.decoded.email?.toLowerCase().trim();
-
-                // Verify payment intent
                 const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
                 if (paymentIntent.status !== 'succeeded') {
                     return res.status(400).json({ error: 'Payment not successful' });
                 }
-
-                // Update user membership status, subscription, and badge
                 const result = await userCollection.updateOne(
                     { email: decodedEmail },
                     {
@@ -156,11 +133,9 @@ async function run() {
                         }
                     }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'User not found' });
                 }
-
                 res.json({ message: 'Membership upgraded to Premium with Gold badge' });
             } catch (error) {
                 console.error('Error upgrading membership:', error);
@@ -168,86 +143,60 @@ async function run() {
             }
         });
 
-
-
-
-
-
-
-        // User collection
         app.post('/users', async (req, res) => {
             try {
                 const { email, name } = req.body;
-
                 if (!email) {
                     return res.status(400).json({ message: 'Email is required' });
                 }
-
                 const normalizedEmail = email.toLowerCase().trim();
                 const userExist = await userCollection.findOne({
                     email: { $regex: new RegExp(`^${normalizedEmail}$`, 'i') }
                 });
-
                 if (userExist) {
                     return res.status(200).json({ message: 'User already exists', inserted: false });
                 }
-
                 const now = new Date().toISOString();
-
                 const user = {
                     username: name || 'Anonymous',
                     email: normalizedEmail,
-                    role: 'user',                 // default
-                    subscription: 'free',         // default
-                    Badge: 'Bronze',              // default
+                    role: 'user',
+                    subscription: 'free',
+                    Badge: 'Bronze',
                     created_at: now,
                     last_log_in: now,
                 };
-
                 const result = await userCollection.insertOne(user);
                 res.status(201).json({ message: 'User created successfully', insertedId: result.insertedId });
-
             } catch (error) {
                 console.error('Error inserting user:', error);
                 res.status(500).json({ message: `Failed to add user: ${error.message}` });
             }
         });
 
-
-
-
-
-        // Update User Profile
-        // Update User Profile
         app.put('/users/update', verifyFireBaseToken, async (req, res) => {
             try {
                 const { email, updates } = req.body;
                 const decodedEmail = req.decoded.email?.toLowerCase().trim();
-
                 if (!email || !updates || email !== decodedEmail) {
                     return res.status(400).json({ success: false, message: 'Invalid request or unauthorized' });
                 }
-
                 const allowedUpdates = ['name', 'phone', 'address', 'photoURL', 'bio'];
                 const updateFields = Object.keys(updates).filter(key => allowedUpdates.includes(key));
                 if (updateFields.length === 0) {
                     return res.status(400).json({ success: false, message: 'No valid fields to update' });
                 }
-
                 const updateData = {};
                 updateFields.forEach(field => {
-                    updateData[field] = updates[field] || null; // Allow null to clear fields
+                    updateData[field] = updates[field] || null;
                 });
-
                 const result = await userCollection.updateOne(
                     { email: decodedEmail },
                     { $set: updateData }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ success: false, message: 'User not found' });
                 }
-
                 res.json({ success: true, message: 'Profile updated successfully' });
             } catch (error) {
                 console.error('Error updating user profile:', error);
@@ -255,11 +204,6 @@ async function run() {
             }
         });
 
-
-
-        // Post APIs
-        // Post Creation API with Post Limit Check
-        // Post Creation API with Post Limit Check
         app.post('/user/post/:uid', verifyFireBaseToken, async (req, res) => {
             try {
                 const uid = req.params.uid;
@@ -275,13 +219,10 @@ async function run() {
                     upVote,
                     downVote,
                 } = req.body;
-
-                // Check user membership and post count
                 const user = await userCollection.findOne({ email: decodedEmail });
                 if (!user) {
                     return res.status(404).json({ error: 'User not found' });
                 }
-
                 if (user.subscription !== 'premium' && user.role !== 'admin') {
                     const postCount = await postsCollection.countDocuments({ userId: uid });
                     if (postCount >= 5) {
@@ -290,7 +231,6 @@ async function run() {
                         });
                     }
                 }
-
                 const postData = {
                     _id: new Date().getTime().toString(),
                     userId: uid,
@@ -306,7 +246,6 @@ async function run() {
                     downVote: downVote || 0,
                     comments: [],
                 };
-
                 const result = await postsCollection.insertOne(postData);
                 res.status(201).json({ message: 'Post created successfully', post: postData });
             } catch (error) {
@@ -315,10 +254,6 @@ async function run() {
             }
         });
 
-
-
-
-        // Get User Subscription
         app.get('/users/subscription/:email', verifyFireBaseToken, async (req, res) => {
             try {
                 const email = req.params.email.toLowerCase().trim();
@@ -333,9 +268,6 @@ async function run() {
             }
         });
 
-
-
-
         app.put('/user/post/:postId/upvote', verifyFireBaseToken, async (req, res) => {
             try {
                 const postId = req.params.postId;
@@ -343,11 +275,9 @@ async function run() {
                     { _id: postId },
                     { $inc: { upVote: 1 } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Post not found' });
                 }
-
                 res.json({ message: 'Upvoted successfully' });
             } catch (error) {
                 console.error('Error upvoting post:', error);
@@ -362,11 +292,9 @@ async function run() {
                     { _id: postId },
                     { $inc: { downVote: 1 } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Post not found' });
                 }
-
                 res.json({ message: 'Downvoted successfully' });
             } catch (error) {
                 console.error('Error downvoting post:', error);
@@ -374,16 +302,13 @@ async function run() {
             }
         });
 
-        // Comment APIs
         app.post('/user/post/:postId/comment', verifyFireBaseToken, async (req, res) => {
             try {
                 const postId = req.params.postId;
                 const { comment, userName, userImage, userEmail } = req.body;
-
                 if (!comment) {
                     return res.status(400).json({ error: 'Comment text is required' });
                 }
-
                 const commentData = {
                     _id: new ObjectId(),
                     text: comment,
@@ -395,16 +320,13 @@ async function run() {
                     downVote: 0,
                     replies: []
                 };
-
                 const result = await postsCollection.updateOne(
                     { _id: postId },
                     { $push: { comments: commentData } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Post not found' });
                 }
-
                 res.json({ message: 'Comment added successfully', comment: commentData });
             } catch (error) {
                 console.error('Error adding comment:', error);
@@ -425,11 +347,9 @@ async function run() {
                     { _id: postId, 'comments._id': commentObjectId },
                     { $inc: { 'comments.$.upVote': 1 } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Post or comment not found' });
                 }
-
                 res.json({ message: 'Comment upvoted successfully' });
             } catch (error) {
                 console.error('Error upvoting comment:', error);
@@ -450,11 +370,9 @@ async function run() {
                     { _id: postId, 'comments._id': commentObjectId },
                     { $inc: { 'comments.$.downVote': 1 } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Post or comment not found' });
                 }
-
                 res.json({ message: 'Comment downvoted successfully' });
             } catch (error) {
                 console.error('Error downvoting comment:', error);
@@ -462,35 +380,28 @@ async function run() {
             }
         });
 
-        // Reply API
         app.post('/user/post/:postId/comment/:commentId/reply', verifyFireBaseToken, async (req, res) => {
             try {
                 const postId = req.params.postId;
                 const commentId = req.params.commentId;
                 const { reply, userName, userImage, userEmail } = req.body;
                 const decodedEmail = req.decoded.email?.toLowerCase().trim();
-
                 if (!reply) {
                     return res.status(400).json({ error: 'Reply text is required' });
                 }
-
                 let commentObjectId;
                 try {
                     commentObjectId = new ObjectId(commentId);
                 } catch (error) {
                     return res.status(400).json({ error: 'Invalid comment ID' });
                 }
-
-                // Verify post and comment exist
                 const post = await postsCollection.findOne({
                     _id: postId,
                     "comments._id": commentObjectId
                 });
-
                 if (!post) {
                     return res.status(404).json({ error: 'Post or comment not found' });
                 }
-
                 const replyData = {
                     _id: new ObjectId(),
                     text: reply.trim(),
@@ -499,7 +410,6 @@ async function run() {
                     userEmail: userEmail || decodedEmail || '',
                     createdAt: new Date().toISOString()
                 };
-
                 const result = await postsCollection.updateOne(
                     {
                         _id: postId,
@@ -507,11 +417,9 @@ async function run() {
                     },
                     { $push: { "comments.$.replies": replyData } }
                 );
-
                 if (result.modifiedCount === 0) {
                     return res.status(500).json({ error: 'Failed to add reply' });
                 }
-
                 res.json({ message: 'Reply added successfully', reply: replyData });
             } catch (error) {
                 console.error('Error adding reply:', error);
@@ -523,26 +431,70 @@ async function run() {
             try {
                 const { postId, commentId } = req.params;
                 const { feedback } = req.body;
-                if (!feedback) {
-                    return res.status(400).json({ error: 'Feedback is required' });
+                const reporterEmail = req.decoded.email?.toLowerCase().trim();
+
+                // Validate inputs
+                if (!feedback || typeof feedback !== 'string' || feedback.trim() === '') {
+                    return res.status(400).json({ error: 'Feedback is required and must be a non-empty string' });
                 }
-                const reporterEmail = req.decoded.email;
+                if (!reporterEmail) {
+                    return res.status(401).json({ error: 'Unauthorized: No email provided in token' });
+                }
+
+                // Validate commentId as ObjectId
+                let commentObjectId;
+                try {
+                    commentObjectId = new ObjectId(commentId);
+                } catch (error) {
+                    return res.status(400).json({ error: 'Invalid comment ID', details: error.message });
+                }
+
+                // Check if post and comment exist
+                const post = await postsCollection.findOne({
+                    _id: postId,
+                    'comments._id': commentObjectId,
+                });
+                if (!post) {
+                    return res.status(404).json({ error: 'Post or comment not found' });
+                }
+
+                // Check for duplicate report
+                const existingReport = await reportsCollection.findOne({
+                    postId,
+                    commentId: commentObjectId,
+                    reporterEmail,
+                });
+                if (existingReport) {
+                    return res.status(409).json({ error: 'You have already reported this comment' });
+                }
+
+                // Create report
                 const reportData = {
                     postId,
-                    commentId: new ObjectId(commentId),
-                    feedback,
+                    commentId: commentObjectId,
+                    feedback: feedback.trim(),
                     reporterEmail,
                     reportedAt: new Date().toISOString(),
                 };
                 const result = await reportsCollection.insertOne(reportData);
-                res.status(201).json({ message: 'Comment reported successfully' });
+
+                res.status(201).json({ message: 'Comment reported successfully', reportId: result.insertedId });
             } catch (error) {
-                console.error('Error reporting comment:', error);
-                res.status(500).json({ error: 'Failed to report comment' });
+                console.error('Error reporting comment:', {
+                    message: error.message,
+                    stack: error.stack,
+                    code: error.code,
+                    name: error.name,
+                });
+                res.status(500).json({
+                    error: 'Failed to report comment',
+                    details: error.message || 'Internal server error',
+                });
             }
         });
 
-        // Get count of posts by user
+
+
         app.get('/user/post/count/:id', async (req, res) => {
             try {
                 const userId = req.params.id;
@@ -554,7 +506,6 @@ async function run() {
             }
         });
 
-        // Get posts by user
         app.get('/user/posts/:id', async (req, res) => {
             try {
                 const userId = req.params.id;
@@ -569,16 +520,13 @@ async function run() {
             }
         });
 
-        // Get a single post by ID
         app.get('/user/post/:postId', async (req, res) => {
             try {
                 const { postId } = req.params;
                 const post = await postsCollection.findOne({ _id: postId });
-
                 if (!post) {
                     return res.status(404).json({ error: 'Post not found' });
                 }
-
                 res.json(post);
             } catch (error) {
                 console.error('Error fetching post:', error);
@@ -586,53 +534,74 @@ async function run() {
             }
         });
 
-        // Get all posts with sorting support
         app.get('/user/all-post', async (req, res) => {
             try {
-                const sortType = req.query.sort || 'popularity'; // Default to popularity
-                let sortStage;
+                const sortType = req.query.sort || 'popularity';
+                const page = Math.max(1, parseInt(req.query.page) || 1); // Default to page 1
+                const limit = Math.max(1, parseInt(req.query.limit) || 10); // Default to 10 posts
+                const skip = (page - 1) * limit; // Calculate skip for pagination
 
+                let sortStage;
                 if (sortType === 'newest') {
-                    sortStage = { $sort: { createdAt: -1 } };
+                    sortStage = { createdAt: -1 };
                 } else {
-                    // Popularity: voteDifference desc, then createdAt desc
-                    sortStage = { $sort: { voteDifference: -1, createdAt: -1 } };
+                    sortStage = { voteDifference: -1, createdAt: -1 };
                 }
 
+                // Ensure postsCollection exists
+                const collections = await db.listCollections({ name: 'posts' }).toArray();
+                if (collections.length === 0) {
+                    return res.status(404).json({ error: 'Posts collection not found', posts: [], totalCount: 0, currentPage: page, totalPages: 1 });
+                }
+
+                // Aggregation pipeline for fetching posts
                 const pipeline = [
                     {
                         $addFields: {
                             voteDifference: { $subtract: ['$upVote', '$downVote'] },
                         },
                     },
-                    sortStage,
+                    { $sort: sortStage },
+                    { $skip: skip },
+                    { $limit: limit },
                 ];
 
-                const result = await postsCollection.aggregate(pipeline).toArray();
-                res.send(result);
+                // Fetch paginated posts
+                const posts = await postsCollection.aggregate(pipeline).toArray();
+
+                // Fetch total count of posts for pagination
+                const totalCount = await postsCollection.countDocuments();
+
+                res.json({
+                    posts: posts || [],
+                    totalCount: totalCount || 0,
+                    currentPage: page,
+                    totalPages: Math.ceil(totalCount / limit) || 1,
+                });
             } catch (error) {
-                console.error('Error fetching posts:', error);
-                res.status(500).json({ error: 'Failed to fetch posts' });
+                console.error('Error fetching posts:', {
+                    message: error.message,
+                    stack: error.stack,
+                    code: error.code,
+                    name: error.name,
+                });
+                res.status(500).json({ error: 'Failed to fetch posts', details: error.message });
             }
         });
 
-        // Delete post
+
         app.delete('/user/post/:postId', verifyFireBaseToken, async (req, res) => {
             try {
                 const { postId } = req.params;
                 const userId = req.decoded.uid;
-
                 if (!userId) return res.status(401).json({ error: 'User ID required' });
-
                 const result = await postsCollection.deleteOne({
                     _id: postId,
                     userId: userId,
                 });
-
                 if (result.deletedCount === 0) {
                     return res.status(403).json({ error: 'Post not found or not authorized to delete' });
                 }
-
                 res.json({ message: 'Post deleted successfully' });
             } catch (error) {
                 console.error(error);
@@ -640,10 +609,44 @@ async function run() {
             }
         });
 
-        // Get User Role
+        app.get('/users', verifyFireBaseToken, async (req, res) => {
+            try {
+                const userEmail = req.decoded.email?.toLowerCase().trim();
+                const user = await userCollection.findOne({ email: userEmail });
+                if (!user || user.role !== 'admin') {
+                    return res.status(403).json({ error: 'Unauthorized: Admin access required' });
+                }
 
+                const search = req.query.search || '';
+                const page = parseInt(req.query.page) || 1;
+                const limit = parseInt(req.query.limit) || 10;
+                const skip = (page - 1) * limit;
 
-        // Get User Subscription and Role
+                const query = search
+                    ? { username: { $regex: search, $options: 'i' } }
+                    : {};
+
+                const users = await userCollection
+                    .find(query)
+                    .sort({ created_at: -1 })
+                    .skip(skip)
+                    .limit(limit)
+                    .toArray();
+
+                const totalCount = await userCollection.countDocuments(query);
+
+                res.json({
+                    users,
+                    totalCount,
+                    currentPage: page,
+                    totalPages: Math.ceil(totalCount / limit),
+                });
+            } catch (error) {
+                console.error('Error fetching users:', error);
+                res.status(500).json({ error: 'Failed to fetch users', details: error.message });
+            }
+        });
+
         app.get('/users/role/:email', verifyFireBaseToken, async (req, res) => {
             try {
                 const email = req.params.email.toLowerCase().trim();
@@ -667,8 +670,6 @@ async function run() {
             }
         });
 
-
-        // Get User Post Count
         app.get('/user/post/count/:uid', verifyFireBaseToken, async (req, res) => {
             try {
                 const uid = req.params.uid;
@@ -679,7 +680,7 @@ async function run() {
                 res.status(500).json({ error: 'Failed to fetch post count' });
             }
         });
-        // Get User Posts
+
         app.get('/user/posts/:uid', verifyFireBaseToken, async (req, res) => {
             try {
                 const uid = req.params.uid;
@@ -691,52 +692,40 @@ async function run() {
             }
         });
 
-
-
-        // Admin APIs
-        app.get('/users', verifyFireBaseToken, async (req, res) => {
-            try {
-                const search = req.query.search || '';
-                const query = search ? { name: { $regex: search, $options: 'i' } } : {};
-                const users = await userCollection.find(query).toArray();
-                res.json(users.map(user => ({
-                    email: user.email,
-                    name: user.name || user.username || 'Anonymous',
-                    bio: user.bio || '',
-                    photoURL: user.photoURL || '',
-                    Badge: user.Badge || 'Bronze'
-                })));
-            } catch (error) {
-                console.error('Error fetching users:', error);
-                res.status(500).json({ error: 'Failed to fetch users' });
-            }
-        });
-
-        // server.js
-        app.post('/connections', verifyFireBaseToken, async (req, res) => {
-            const { fromEmail, toEmail } = req.body;
-            await db.collection('connections').insertOne({
-                fromEmail,
-                toEmail,
-                status: 'pending',
-                createdAt: new Date().toISOString(),
-            });
-            res.json({ message: 'Connection request sent' });
-        });
-
-
         app.get('/public-users', verifyFireBaseToken, async (req, res) => {
             try {
                 const search = req.query.search || '';
-                const query = search ? { name: { $regex: search, $options: 'i' } } : {};
-                const users = await userCollection.find(query).toArray();
-                res.json(users.map(user => ({
-                    email: user.email,
-                    name: user.name || user.username || 'Anonymous',
-                    bio: user.bio || '',
-                    photoURL: user.photoURL || '',
-                    Badge: user.Badge || 'Bronze'
-                })));
+                const page = parseInt(req.query.page) || 1;
+                const limit = parseInt(req.query.limit) || 10;
+                const skip = (page - 1) * limit;
+
+                const query = search
+                    ? { $or: [{ name: { $regex: search, $options: 'i' } }, { username: { $regex: search, $options: 'i' } }] }
+                    : {};
+
+                // Fetch paginated users
+                const users = await userCollection
+                    .find(query)
+                    .sort({ created_at: -1 })
+                    .skip(skip)
+                    .limit(limit)
+                    .toArray();
+
+                // Get total count for pagination
+                const totalCount = await userCollection.countDocuments(query);
+
+                res.json({
+                    users: users.map(user => ({
+                        email: user.email,
+                        name: user.name || user.username || 'Anonymous',
+                        bio: user.bio || '',
+                        photoURL: user.photoURL || '',
+                        Badge: user.Badge || 'Bronze'
+                    })),
+                    totalCount,
+                    currentPage: page,
+                    totalPages: Math.ceil(totalCount / limit),
+                });
             } catch (error) {
                 console.error('Error fetching public users:', error);
                 res.status(500).json({ error: 'Failed to fetch users' });
@@ -744,21 +733,107 @@ async function run() {
         });
 
 
+        app.post('/connections', verifyFireBaseToken, async (req, res) => {
+            try {
+                const { fromEmail, toEmail } = req.body;
+                if (!fromEmail || !toEmail) {
+                    return res.status(400).json({ error: 'Both fromEmail and toEmail are required' });
+                }
+                const existingConnection = await connectionsCollection.findOne({
+                    $or: [
+                        { fromEmail, toEmail },
+                        { fromEmail: toEmail, toEmail: fromEmail }
+                    ]
+                });
+                if (existingConnection) {
+                    return res.status(409).json({ error: 'Connection request already exists' });
+                }
+                const connectionData = {
+                    fromEmail,
+                    toEmail,
+                    status: 'pending',
+                    createdAt: new Date().toISOString(),
+                };
+                await connectionsCollection.insertOne(connectionData);
+                res.json({ message: 'Connection request sent' });
+            } catch (error) {
+                console.error('Error creating connection:', error);
+                res.status(500).json({ error: 'Failed to create connection' });
+            }
+        });
 
-
+        app.get('/connections/:email', verifyFireBaseToken, async (req, res) => {
+            try {
+                const email = req.params.email.toLowerCase().trim();
+                const decodedEmail = req.decoded.email?.toLowerCase().trim();
+                if (email !== decodedEmail) {
+                    return res.status(403).json({ error: 'Unauthorized: Can only view own connections' });
+                }
+                const connections = await connectionsCollection.find({
+                    $or: [
+                        { fromEmail: email },
+                        { toEmail: email }
+                    ]
+                }).toArray();
+                res.json(connections);
+            } catch (error) {
+                console.error('Error fetching connections:', error);
+                res.status(500).json({ error: 'Failed to fetch connections' });
+            }
+        });
 
         app.get('/reports', verifyFireBaseToken, async (req, res) => {
             try {
-                const userEmail = req.decoded.email;
+                const userEmail = req.decoded.email?.toLowerCase().trim();
+                if (!userEmail) {
+                    return res.status(401).json({ error: 'Unauthorized: No email provided in token' });
+                }
+
                 const user = await userCollection.findOne({ email: userEmail });
-                if (!user || user.role !== 'admin') {
+                if (!user) {
+                    return res.status(404).json({ error: 'User not found' });
+                }
+                if (user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-                const reports = await reportsCollection.find().sort({ reportedAt: -1 }).toArray();
-                res.json(reports);
+
+                const page = Math.max(1, parseInt(req.query.page) || 1);
+                const limit = Math.max(1, parseInt(req.query.limit) || 10); // Default to 10 reports
+                const skip = (page - 1) * limit;
+
+                // Ensure reportsCollection exists
+                const collections = await db.listCollections({ name: 'reports' }).toArray();
+                if (collections.length === 0) {
+                    return res.status(404).json({ error: 'Reports collection not found' });
+                }
+
+                // Validate reportedAt field existence
+                const reports = await reportsCollection
+                    .find({ reportedAt: { $exists: true } }) // Ensure reportedAt exists
+                    .sort({ reportedAt: -1 })
+                    .skip(skip)
+                    .limit(limit)
+                    .toArray();
+
+                const totalCount = await reportsCollection.countDocuments({ reportedAt: { $exists: true } });
+
+                res.json({
+                    reports: reports || [],
+                    totalCount: totalCount || 0,
+                    currentPage: page,
+                    totalPages: Math.ceil(totalCount / limit) || 1,
+                });
             } catch (error) {
-                console.error('Error fetching reports:', error);
-                res.status(500).json({ error: 'Failed to fetch reports' });
+                console.error('Error fetching reports:', {
+                    message: error.message,
+                    stack: error.stack,
+                    code: error.code,
+                    name: error.name,
+                });
+                res.status(500).json({
+                    error: 'Failed to fetch reports',
+                    details: error.message || 'Internal server error',
+                });
             }
         });
 
@@ -770,23 +845,19 @@ async function run() {
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-
                 let commentObjectId;
                 try {
                     commentObjectId = new ObjectId(commentId);
                 } catch (error) {
                     return res.status(400).json({ error: 'Invalid comment ID' });
                 }
-
                 const result = await postsCollection.updateOne(
                     { _id: postId },
                     { $pull: { comments: { _id: commentObjectId } } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Post or comment not found' });
                 }
-
                 await reportsCollection.deleteMany({ postId, commentId: commentObjectId });
                 res.json({ message: 'Comment deleted successfully' });
             } catch (error) {
@@ -817,22 +888,18 @@ async function run() {
         app.patch('/users/remove-admin/:id', verifyFireBaseToken, async (req, res) => {
             const { id } = req.params;
             const loggedInEmail = req.decoded.email;
-
             try {
                 const user = await userCollection.findOne({ email: loggedInEmail });
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-
                 const result = await userCollection.updateOne(
                     { _id: new ObjectId(id), email: { $ne: loggedInEmail } },
                     { $set: { role: 'user' } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(403).json({ message: "Cannot remove yourself or user not found" });
                 }
-
                 res.json({ message: "Admin removed successfully" });
             } catch (err) {
                 console.error(err);
@@ -843,25 +910,19 @@ async function run() {
         app.delete('/users/:id', verifyFireBaseToken, async (req, res) => {
             const userId = req.params.id;
             const adminEmail = req.decoded.email;
-
             try {
                 const user = await userCollection.findOne({ email: adminEmail });
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-
                 const userToDelete = await userCollection.findOne({ _id: new ObjectId(userId) });
-
                 if (!userToDelete) {
                     return res.status(404).json({ message: "User not found" });
                 }
-
                 if (userToDelete.role === "admin") {
                     return res.status(403).json({ message: "Cannot delete an admin" });
                 }
-
                 const result = await userCollection.deleteOne({ _id: new ObjectId(userId) });
-
                 if (result.deletedCount === 1) {
                     return res.json({ message: "User deleted successfully" });
                 } else {
@@ -873,7 +934,6 @@ async function run() {
             }
         });
 
-        // Announcement APIs
         app.post('/announcements', verifyFireBaseToken, upload.single('authorImage'), async (req, res) => {
             try {
                 const decodedEmail = req.decoded.email?.toLowerCase().trim();
@@ -881,17 +941,14 @@ async function run() {
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ message: 'Unauthorized: Admin access required' });
                 }
-
                 const { authorName, title, description } = req.body;
                 if (!authorName || !title || !description) {
                     return res.status(400).json({ message: 'All fields (authorName, title, description) are required' });
                 }
-
                 let authorImage = "";
                 if (!req.file) {
                     return res.status(400).json({ message: 'Author image is required' });
                 }
-
                 try {
                     const validImageTypes = ['image/jpeg', 'image/png', 'image/gif'];
                     if (!validImageTypes.includes(req.file.mimetype)) {
@@ -900,7 +957,6 @@ async function run() {
                     if (req.file.size > 5 * 1024 * 1024) {
                         return res.status(400).json({ message: 'Image size exceeds 5MB limit.' });
                     }
-
                     const uploadResult = await new Promise((resolve, reject) => {
                         const stream = cloudinary.uploader.upload_stream(
                             { folder: 'announcements', resource_type: 'image' },
@@ -917,7 +973,6 @@ async function run() {
                 } catch (uploadError) {
                     return res.status(500).json({ message: `Failed to upload image to Cloudinary: ${uploadError.message}` });
                 }
-
                 const announcement = {
                     authorImage,
                     authorName: authorName.trim(),
@@ -925,11 +980,8 @@ async function run() {
                     description: description.trim(),
                     createdAt: new Date().toISOString(),
                 };
-
                 const result = await announcementCollection.insertOne(announcement);
                 const announcementId = result.insertedId;
-
-                // Notify all users
                 const users = await userCollection.find({ email: { $exists: true, $ne: null, $ne: '' } }).toArray();
                 let successCount = 0;
                 let failureCount = 0;
@@ -966,7 +1018,6 @@ async function run() {
                         failureCount++;
                     }
                 }
-
                 res.status(201).json({
                     message: 'Announcement created successfully',
                     announcement: { ...announcement, _id: announcementId },
@@ -985,21 +1036,17 @@ async function run() {
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ message: 'Unauthorized: Admin access required' });
                 }
-
                 const { announcementId } = req.body;
                 if (!announcementId) {
                     return res.status(400).json({ message: 'announcementId is required' });
                 }
-
                 const announcement = await announcementCollection.findOne({ _id: new ObjectId(announcementId) });
                 if (!announcement) {
                     return res.status(404).json({ message: 'Announcement not found' });
                 }
-
                 const users = await userCollection.find({ email: { $exists: true, $ne: null, $ne: '' } }).toArray();
                 let successCount = 0;
                 let failureCount = 0;
-
                 for (const user of users) {
                     try {
                         const userEmail = user.email.toLowerCase().trim();
@@ -1025,7 +1072,6 @@ async function run() {
                         failureCount++;
                     }
                 }
-
                 res.json({
                     message: 'Notifications resent successfully',
                     notifications: { success: successCount, failures: failureCount }
@@ -1057,19 +1103,16 @@ async function run() {
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ message: 'Unauthorized: Admin access required' });
                 }
-
                 let announcementObjectId;
                 try {
                     announcementObjectId = new ObjectId(id);
                 } catch (error) {
                     return res.status(400).json({ message: 'Invalid announcement ID' });
                 }
-
                 const result = await announcementCollection.deleteOne({ _id: announcementObjectId });
                 if (result.deletedCount === 0) {
                     return res.status(404).json({ message: 'Announcement not found' });
                 }
-
                 res.json({ message: 'Announcement deleted successfully' });
             } catch (err) {
                 console.error('Error deleting announcement:', err);
@@ -1084,13 +1127,11 @@ async function run() {
                 if (pathEmail !== decodedEmail) {
                     return res.status(403).json({ message: 'Email mismatch - unauthorized' });
                 }
-
                 const { all } = req.query;
                 const filter = { userEmail: pathEmail };
                 if (all !== 'true') {
                     filter.read = false;
                 }
-
                 const notifications = await notificationsCollection
                     .find(filter)
                     .sort({ createdAt: -1 })
@@ -1112,16 +1153,13 @@ async function run() {
                 } catch (error) {
                     return res.status(400).json({ message: 'Invalid notification ID' });
                 }
-
                 const result = await notificationsCollection.updateOne(
                     { _id: notificationObjectId, userEmail },
                     { $set: { read: true } }
                 );
-
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ message: 'Notification not found' });
                 }
-
                 res.json({ message: 'Notification marked as read' });
             } catch (err) {
                 console.error('Error marking notification as read:', err);
@@ -1136,12 +1174,10 @@ async function run() {
                 if (pathEmail !== decodedEmail) {
                     return res.status(403).json({ message: 'Email mismatch - unauthorized' });
                 }
-
                 const result = await notificationsCollection.updateMany(
                     { userEmail: pathEmail, read: false },
                     { $set: { read: true } }
                 );
-
                 res.json({ message: 'All notifications marked as read', modified: result.modifiedCount });
             } catch (err) {
                 console.error('Error marking all as read:', err);
@@ -1149,7 +1185,6 @@ async function run() {
             }
         });
 
-        // Tags APIs
         app.get('/user/all-tags', async (req, res) => {
             try {
                 const result = await postsCollection
@@ -1160,7 +1195,6 @@ async function run() {
                         { $project: { tag: '$_id', _id: 0 } }
                     ])
                     .toArray();
-
                 const tags = result
                     .map(doc => doc.tag)
                     .filter(tag => tag && typeof tag === 'string' && tag.trim() !== '')
@@ -1199,7 +1233,6 @@ async function run() {
                 if (!tag) {
                     return res.status(400).json({ error: 'Tag parameter is required' });
                 }
-
                 const normalizedTag = tag.trim().toLowerCase();
                 const posts = await postsCollection
                     .find({
@@ -1210,7 +1243,6 @@ async function run() {
                     })
                     .sort({ upVote: -1, createdAt: -1 })
                     .toArray();
-
                 if (posts.length === 0) {
                     const partialMatchPosts = await postsCollection
                         .find({
@@ -1223,7 +1255,6 @@ async function run() {
                         .toArray();
                     return res.json(partialMatchPosts);
                 }
-
                 res.json(posts);
             } catch (error) {
                 console.error('Error in /user/posts/search:', error);
@@ -1234,22 +1265,12 @@ async function run() {
             }
         });
 
-
-
-
-
-
-
-
-        // API to get admin profile
         app.get('/admin/profile', verifyFireBaseToken, async (req, res) => {
             try {
                 const userEmail = req.decoded.email?.toLowerCase().trim();
                 if (!userEmail) {
                     return res.status(400).json({ error: 'Email not provided in token' });
                 }
-
-                // Fetch user
                 const user = await userCollection.findOne({ email: userEmail });
                 if (!user) {
                     return res.status(404).json({ error: 'User not found' });
@@ -1257,14 +1278,8 @@ async function run() {
                 if (user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-
-                // Total users
                 const totalUsers = await userCollection.countDocuments();
-
-                // Total posts
                 const totalPosts = await postsCollection.countDocuments();
-
-                // Total comments
                 const commentsAggregate = await postsCollection
                     .aggregate([
                         { $match: { comments: { $exists: true, $ne: [] } } },
@@ -1273,38 +1288,20 @@ async function run() {
                     ])
                     .toArray();
                 const totalComments = commentsAggregate.length > 0 ? commentsAggregate[0].totalComments : 0;
-
-                // Total upVotes (likes)
                 const upVotesAggregate = await postsCollection.aggregate([
                     { $group: { _id: null, totalUpVotes: { $sum: "$upVote" } } }
                 ]).toArray();
                 const totalUpVotes = upVotesAggregate.length > 0 ? upVotesAggregate[0].totalUpVotes : 0;
-
-                // Total downVotes (dislikes)
                 const downVotesAggregate = await postsCollection.aggregate([
                     { $group: { _id: null, totalDownVotes: { $sum: "$downVote" } } }
                 ]).toArray();
                 const totalDownVotes = downVotesAggregate.length > 0 ? downVotesAggregate[0].totalDownVotes : 0;
-
-                // Total reports
                 const totalReports = await reportsCollection.countDocuments();
-
-                // Total notifications
                 const totalNotifications = await notificationsCollection.countDocuments();
-
-                // Total announcements
                 const totalAnnouncements = await announcementCollection.countDocuments();
-
-                // Total admins
                 const totalAdmins = await userCollection.countDocuments({ role: 'admin' });
-
-                // Total premium users
                 const totalPremium = await userCollection.countDocuments({ subscription: 'premium' });
-
-                // Admin's posts
                 const adminPosts = await postsCollection.countDocuments({ authorEmail: userEmail });
-
-                // Admin's comments
                 const adminCommentsAggregate = await postsCollection
                     .aggregate([
                         { $unwind: { path: "$comments", preserveNullAndEmptyArrays: true } },
@@ -1313,11 +1310,8 @@ async function run() {
                     ])
                     .toArray();
                 const adminComments = adminCommentsAggregate.length > 0 ? adminCommentsAggregate[0].totalAdminComments : 0;
-
-                // Recent activity (last 30 days)
                 const thirtyDaysAgo = new Date();
                 thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
                 const recentPosts = await postsCollection.aggregate([
                     { $match: { createdAt: { $gte: thirtyDaysAgo.toISOString() } } },
                     {
@@ -1329,7 +1323,6 @@ async function run() {
                     { $sort: { _id: 1 } },
                     { $project: { date: "$_id", posts: 1, _id: 0 } }
                 ]).toArray();
-
                 const recentUsers = await userCollection.aggregate([
                     { $match: { created_at: { $gte: thirtyDaysAgo.toISOString() } } },
                     {
@@ -1341,7 +1334,6 @@ async function run() {
                     { $sort: { _id: 1 } },
                     { $project: { date: "$_id", users: 1, _id: 0 } }
                 ]).toArray();
-
                 const recentComments = await postsCollection.aggregate([
                     { $unwind: "$comments" },
                     { $match: { "comments.createdAt": { $gte: thirtyDaysAgo.toISOString() } } },
@@ -1354,7 +1346,6 @@ async function run() {
                     { $sort: { _id: 1 } },
                     { $project: { date: "$_id", comments: 1, _id: 0 } }
                 ]).toArray();
-
                 res.json({
                     name: user.username || 'Admin',
                     image: user.photoURL || 'https://via.placeholder.com/150',
@@ -1384,33 +1375,25 @@ async function run() {
             }
         });
 
-
-
-
-        // API to add tag (admin only)
         app.post('/tags', verifyFireBaseToken, async (req, res) => {
             try {
                 const userEmail = req.decoded.email?.toLowerCase().trim();
                 if (!userEmail) {
                     return res.status(400).json({ error: 'Email not provided in token' });
                 }
-
                 const user = await userCollection.findOne({ email: userEmail });
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-
                 const { name } = req.body;
                 if (!name || typeof name !== 'string' || name.trim() === '') {
                     return res.status(400).json({ error: 'Valid tag name required' });
                 }
-
                 const normalizedTag = name.trim().toLowerCase();
                 const existing = await tagsCollection.findOne({ name: normalizedTag });
                 if (existing) {
                     return res.status(409).json({ error: 'Tag already exists' });
                 }
-
                 const result = await tagsCollection.insertOne({
                     name: normalizedTag,
                     createdAt: new Date().toISOString(),
@@ -1422,7 +1405,6 @@ async function run() {
             }
         });
 
-        // API to get all tags
         app.get('/tags', async (req, res) => {
             try {
                 const tags = await tagsCollection.find().sort({ name: 1 }).toArray();
@@ -1433,32 +1415,24 @@ async function run() {
             }
         });
 
-
-
-        // New backend API: app.delete('/tags/:name')
-        // Add this new endpoint after the existing app.post('/tags', ...)
         app.delete('/tags/:name', verifyFireBaseToken, async (req, res) => {
             try {
                 const userEmail = req.decoded.email?.toLowerCase().trim();
                 if (!userEmail) {
                     return res.status(400).json({ error: 'Email not provided in token' });
                 }
-
                 const user = await userCollection.findOne({ email: userEmail });
                 if (!user || user.role !== 'admin') {
                     return res.status(403).json({ error: 'Unauthorized: Admin access required' });
                 }
-
                 const tagName = req.params.name.trim().toLowerCase();
                 if (!tagName) {
                     return res.status(400).json({ error: 'Tag name required' });
                 }
-
                 const result = await tagsCollection.deleteOne({ name: tagName });
                 if (result.deletedCount === 0) {
                     return res.status(404).json({ error: 'Tag not found' });
                 }
-
                 res.json({ message: 'Tag deleted successfully' });
             } catch (error) {
                 console.error('Error deleting tag:', error.message, error.stack);
@@ -1466,28 +1440,22 @@ async function run() {
             }
         });
 
-
-
-
         app.get('/posts/search', async (req, res) => {
             try {
                 const tag = req.query.tag?.trim().toLowerCase();
                 if (!tag) {
                     return res.status(400).json({ error: 'Tag is required for search' });
                 }
-
                 const posts = await postsCollection.find({ tag }).toArray();
                 if (posts.length === 0) {
                     return res.status(404).json({ message: 'No posts found for this tag' });
                 }
-
                 res.json(posts);
             } catch (error) {
                 console.error('Error searching posts:', error.message, error.stack);
                 res.status(500).json({ error: 'Failed to search posts', details: error.message });
             }
         });
-
 
         app.get('/posts', async (req, res) => {
             try {
@@ -1503,8 +1471,14 @@ async function run() {
         });
 
 
-
-
+        app.get('/user/posts/count', async (req, res) => {
+            try {
+                const count = await Post.countDocuments({});
+                res.json({ count });
+            } catch (error) {
+                res.status(500).json({ message: 'Failed to fetch posts count' });
+            }
+        });
 
 
 
