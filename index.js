@@ -36,31 +36,38 @@ admin.initializeApp({
 
 const bucket = admin.storage().bucket();
 
-// server.js (update verifyFireBaseToken middleware)
+// server.js (verifyFireBaseToken middleware)
 const verifyFireBaseToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    console.error('verifyFireBaseToken: Missing Authorization header', { url: req.originalUrl });
-    return res.status(401).send({ message: 'unauthorized access', details: 'Missing Authorization header' });
-  }
-  const token = authHeader.split(' ')[1];
-  if (!token) {
-    console.error('verifyFireBaseToken: Missing token in Authorization header', { url: req.originalUrl });
-    return res.status(401).send({ message: 'unauthorized access', details: 'Missing token' });
-  }
-  try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    console.log('verifyFireBaseToken: Token verified', { uid: decoded.uid, email: decoded.email });
-    req.decoded = decoded;
-    next();
-  } catch (error) {
-    console.error('verifyFireBaseToken: Token verification failed', {
-      url: req.originalUrl,
-      error: error.message,
-      code: error.code,
-    });
-    return res.status(403).send({ message: 'unauthorized access', details: error.message });
-  }
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        console.error('verifyFireBaseToken: Missing Authorization header', { url: req.originalUrl });
+        return res.status(401).send({ message: 'Unauthorized access', details: 'Missing Authorization header' });
+    }
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+        console.error('verifyFireBaseToken: Missing token in Authorization header', { url: req.originalUrl });
+        return res.status(401).send({ message: 'Unauthorized access', details: 'Missing token' });
+    }
+    try {
+        const decoded = await admin.auth().verifyIdToken(token, true); // Check revocation
+        console.log('verifyFireBaseToken: Token verified', { uid: decoded.uid, email: decoded.email });
+        req.decoded = decoded;
+        next();
+    } catch (error) {
+        console.error('verifyFireBaseToken: Token verification failed', {
+            url: req.originalUrl,
+            error: error.message,
+            code: error.code,
+        });
+        // Handle Firebase-specific errors
+        if (error.code === 'auth/id-token-expired') {
+            return res.status(401).send({ message: 'Unauthorized access', details: 'Token expired' });
+        }
+        if (error.code === 'auth/invalid-id-token') {
+            return res.status(401).send({ message: 'Unauthorized access', details: 'Invalid token' });
+        }
+        return res.status(403).send({ message: 'Unauthorized access', details: error.message });
+    }
 };
 
 // MongoDB
